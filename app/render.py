@@ -39,6 +39,7 @@ from .config import (
 )
 from .eq_engine import build_transition_eq, corrective_eq_gains
 from .transition_engine import TransitionPlan
+from .transition_fx import select_and_render_fx
 from .utils import get_logger, safe_float
 
 log = get_logger()
@@ -91,9 +92,10 @@ class Placement:
 
 
 def _source_duration(a: TrackAnalysis, settings: MixSettings | None = None) -> float:
-    if (settings and settings.allow_half_tracks
+    if (settings and settings.is_half_track(a.path)
             and a.features.has_repeat and a.features.half_point > 0):
-        return float(a.features.half_point)
+        fade_margin = min(30.0, a.duration - a.features.half_point)
+        return float(a.features.half_point + fade_margin)
     d = a.metadata.get("duration")
     if d and d > a.features.duration - 1:
         return float(d)
@@ -231,7 +233,7 @@ def render_transition_preview(
         eqd = eq_dict["out"]
         tail = fx.eq3_envelope(tail, sr, eqd["low"], eqd["mid"], eqd["high"])
         tail = _apply_tail_fx(tail, sr, plan, a.bpm * rate_a)
-        fo, _ = fx.equal_power_fades(tail.shape[1])
+        fo = _fast_fade_out(tail.shape[1])
         tail = tail * fo[None, :]
         seg_a[:, a_ov_start:] = tail
 
@@ -258,6 +260,20 @@ def render_transition_preview(
     w_b = min(seg_b.shape[1], total_samples - b_offset)
     if w_b > 0:
         out[:, b_offset:b_offset + w_b] += seg_b[:, :w_b]
+
+    # --- transition FX ---
+    try:
+        fx_layers = select_and_render_fx(
+            plan, a, b, sr,
+            effect_intensity=settings.effect_intensity,
+        )
+        for offset, audio in fx_layers:
+            pos = pad_samples + offset
+            w = min(audio.shape[1], total_samples - pos)
+            if pos >= 0 and w > 0:
+                out[:, pos:pos + w] += audio[:, :w]
+    except Exception as e:
+        log.warning("preview FX failed: %s", e)
 
     # --- light master ---
     out = fx.dc_block(out)
@@ -362,13 +378,13 @@ def render_mix(
             k = min(int(0.4 * sr), seg_len)
             seg[:, :k] *= np.linspace(0, 1, k, dtype=np.float32)[None, :]
 
-        # ---- outgoing tail: EQ bass-swap -> FX -> equal-power fade-out
+        # ---- outgoing tail: EQ bass-swap -> FX -> accelerated fade-out
         if i < n - 1 and Lt > 2:
             eqd = eq_dicts[i]["out"]
             tail = seg[:, seg_len - Lt:]
             tail = fx.eq3_envelope(tail, sr, eqd["low"], eqd["mid"], eqd["high"])
             tail = _apply_tail_fx(tail, sr, plans[i], a.bpm * rate)
-            fade_out, _ = fx.equal_power_fades(tail.shape[1])
+            fade_out = _fast_fade_out(tail.shape[1])
             tail = tail[:, :Lt] * fade_out[None, :]
             seg[:, seg_len - Lt:] = tail
         elif i == n - 1:
@@ -383,6 +399,24 @@ def render_mix(
             out[:, start:start + w] += seg[:, :w]
         del seg
         gc.collect()
+
+    # ---- transition FX layer --------------------------------------------
+    for i in range(n - 1):
+        pl_a = places[i]
+        seg_len_a = int((pl_a.e_use - pl_a.s_use) * sr)
+        ov_start = max(0, int(pl_a.tl_start * sr) + seg_len_a - int(pl_a.tail_overlap * sr))
+        try:
+            fx_layers = select_and_render_fx(
+                plans[i], ordered[i], ordered[i + 1], sr,
+                effect_intensity=settings.effect_intensity,
+            )
+            for offset, audio in fx_layers:
+                pos = ov_start + offset
+                w = min(audio.shape[1], total_samples - pos)
+                if pos >= 0 and w > 0:
+                    out[:, pos:pos + w] += audio[:, :w]
+        except Exception as e:
+            log.warning("transition FX %d failed: %s", i, e)
 
     # ---- master bus -----------------------------------------------------
     report(0.95, "Mastering: loudness + limiter")
@@ -434,6 +468,15 @@ def render_mix(
     result["checks"] = checks
     report(1.0, "Complete")
     return result
+
+
+def _fast_fade_out(n: int) -> np.ndarray:
+    """Accelerated fade-out: holds ~70% for the first 40% of the overlap,
+    then drops steeply through the rest — clears the way for transition FX
+    and the incoming track."""
+    t = np.linspace(0.0, 1.0, max(2, n), dtype=np.float64)
+    fade = np.maximum(np.cos(t * np.pi / 2.0), 0.0) ** 1.8
+    return fade.astype(np.float32)
 
 
 def _apply_tail_fx(tail: np.ndarray, sr: int, plan: TransitionPlan, bpm: float) -> np.ndarray:

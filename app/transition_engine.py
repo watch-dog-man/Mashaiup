@@ -72,6 +72,18 @@ def _in_vocal_region(t: float, regions: list, margin: float = 1.0) -> bool:
     return False
 
 
+def _energy_at(t: float, energy_curve: np.ndarray, duration: float) -> float:
+    """Sample the energy curve at time t (0..1)."""
+    if duration <= 0 or len(energy_curve) == 0:
+        return 0.5
+    idx = t / duration * (len(energy_curve) - 1)
+    idx = clamp(idx, 0, len(energy_curve) - 1)
+    lo = int(idx)
+    hi = min(lo + 1, len(energy_curve) - 1)
+    frac = idx - lo
+    return float(energy_curve[lo] * (1 - frac) + energy_curve[hi] * frac)
+
+
 def _avoid_vocal_region(
     t: float, regions: list, phrase_times: np.ndarray,
     min_t: float, max_t: float, direction: str = "before",
@@ -89,6 +101,96 @@ def _avoid_vocal_region(
     return t
 
 
+def _is_sustained_vocal(t: float, regions: list, min_len: float = 5.0) -> bool:
+    """Check if t is inside a long vocal region (sustained singing, not just ad-libs)."""
+    for r in regions:
+        if r[0] - 1.0 <= t <= r[1] + 1.0 and (r[1] - r[0]) >= min_len:
+            return True
+    return False
+
+
+def _energy_gradient(t: float, energy_curve: np.ndarray, duration: float) -> float:
+    """Positive = energy rising (building up), negative = energy falling (post-drop)."""
+    if duration <= 0 or len(energy_curve) < 3:
+        return 0.0
+    dt = duration * 0.02  # ~2% of track for gradient window
+    e_before = _energy_at(max(0, t - dt), energy_curve, duration)
+    e_after = _energy_at(min(duration, t + dt), energy_curve, duration)
+    return e_after - e_before
+
+
+def _near_vocal_end(t: float, regions: list, margin: float = 4.0) -> bool:
+    """True if t falls just after a vocal region ends (ideal for transition)."""
+    for r in regions:
+        if r[1] <= t <= r[1] + margin:
+            return True
+    return False
+
+
+def _vocal_depth(t: float, regions: list) -> float:
+    """How deep into a vocal region t is: 0 if not in any, 0..1 based on
+    position within the region (0.5 = dead center = worst)."""
+    for r in regions:
+        if r[0] <= t <= r[1]:
+            length = r[1] - r[0]
+            if length < 1:
+                return 0.2
+            pos = (t - r[0]) / length
+            return 1.0 - 2 * abs(pos - 0.5)  # peaks at center
+    return 0.0
+
+
+def _best_exit_candidate(
+    candidates: list[float],
+    vocal_regions: list,
+    energy_curve: np.ndarray,
+    duration: float,
+    ideal: float = 0.0,
+    tight: bool = False,
+) -> float:
+    """Pick the best exit point for a smooth DJ transition.
+
+    When tight=True (half-track mode), musical quality factors (energy dip,
+    vocal avoidance, falling gradient) have significant weight alongside
+    distance.  When tight=False, vocal/energy avoidance dominates.
+    """
+    if not candidates:
+        return 0.0
+    scored = []
+    window = max(1.0, max(abs(pt - ideal) for pt in candidates)) if ideal > 0 else 1.0
+    for pt in candidates:
+        energy = _energy_at(pt, energy_curve, duration)
+        grad = _energy_gradient(pt, energy_curve, duration)
+        near_end = _near_vocal_end(pt, vocal_regions)
+        v_depth = _vocal_depth(pt, vocal_regions)
+        s = 0.0
+        if tight and ideal > 0:
+            norm_dist = abs(pt - ideal) / window
+            s += norm_dist ** 2 * 5.0
+            s += 2.0 if energy > 0.75 else (energy * 0.8)
+            if near_end:
+                s -= 0.8
+            else:
+                s += v_depth * 1.5
+            s += clamp(grad, 0, 1) * 2.0
+            s -= clamp(-grad, 0, 1) * 1.0
+        else:
+            if ideal > 0:
+                s += (abs(pt - ideal) / duration) * 6.0
+            s += 2.5 if energy > 0.7 else (energy * 1.0)
+            if near_end:
+                s -= 0.5
+            else:
+                s += v_depth * 2.0
+            s += clamp(grad, 0, 1) * 2.0
+            s -= clamp(-grad, 0, 1) * 0.3
+        scored.append((s, pt))
+    scored.sort()
+    log.debug("exit-candidates ideal=%.1f tight=%s winner=%.1f (of %d)",
+              ideal, tight, scored[0][1], len(scored))
+    return float(scored[0][1])
+
+
 def _phrase_exit(a: TrackAnalysis, min_tail: float, use_half: bool = False) -> float:
     """
     Choose where A starts leaving: near its mix-out point, snapped to a phrase
@@ -100,12 +202,37 @@ def _phrase_exit(a: TrackAnalysis, min_tail: float, use_half: bool = False) -> f
     of the repeated material.
     """
     dur = a.duration
+    vocals = a.features.vocal_regions or []
+    ecurve = a.features.energy_curve
+
     if use_half and a.features.has_repeat and a.features.half_point > 0:
         ideal = a.features.half_point
         ideal = max(ideal, min_tail + 2.0)
-        exit_t = nearest_phrase(a.beatgrid.phrase_times, ideal, prefer="before")
-        if exit_t + min_tail > dur:
-            exit_t = nearest_phrase(a.beatgrid.phrase_times, dur - min_tail - 0.5, prefer="before")
+        min_exit = min_tail + 2.0
+        max_exit = dur - min_tail
+        # collect phrase boundaries near half-point, plus downbeats at vocal region ends
+        window = dur * 0.15  # wider window for better musical exit candidates
+        candidates = set()
+        for pt in a.beatgrid.phrase_times:
+            if min_exit <= pt <= max_exit and abs(pt - ideal) <= window:
+                candidates.add(float(pt))
+        for vr in vocals:
+            for boundary in (vr[0], vr[1]):
+                if abs(boundary - ideal) <= window and min_exit <= boundary <= max_exit:
+                    bt = nearest_beat(a.beatgrid.downbeat_times, boundary)
+                    if min_exit <= bt <= max_exit:
+                        candidates.add(float(bt))
+        candidates = list(candidates)
+        if not candidates:
+            candidates.append(float(nearest_phrase(
+                a.beatgrid.phrase_times, ideal, prefer="before")))
+        log.debug("half-exit %s ideal=%.1f window=%.1f cands=%d",
+                  a.title[:30], ideal, window, len(candidates))
+        if vocals or len(ecurve) > 0:
+            exit_t = _best_exit_candidate(candidates, vocals, ecurve, dur,
+                                          ideal=ideal, tight=True)
+        else:
+            exit_t = min(candidates, key=lambda p: abs(p - ideal))
         if exit_t + min_tail > dur or exit_t <= 0:
             exit_t = max(0.0, ideal - 0.5)
         return float(exit_t)
@@ -117,12 +244,19 @@ def _phrase_exit(a: TrackAnalysis, min_tail: float, use_half: bool = False) -> f
         exit_t = nearest_phrase(a.beatgrid.phrase_times, dur - min_tail - 0.5, prefer="before")
     if exit_t + min_tail > dur or exit_t <= 0:         # phrase grid unusable -> raw
         exit_t = max(0.0, dur - min_tail - 0.5)
-    # vocal avoidance: slide away from vocal sections
-    if a.features.vocal_regions:
-        exit_t = _avoid_vocal_region(
-            exit_t, a.features.vocal_regions, a.beatgrid.phrase_times,
-            min_t=dur * 0.4, max_t=dur - min_tail,
-        )
+    # vocal & energy avoidance: slide away from vocal/climax sections
+    if vocals:
+        min_t = dur * 0.4
+        max_t = dur - min_tail
+        candidates = [float(pt) for pt in a.beatgrid.phrase_times
+                      if min_t <= pt <= max_t]
+        if candidates and len(ecurve) > 0:
+            exit_t = _best_exit_candidate(candidates, vocals, ecurve, dur, ideal=ideal)
+        else:
+            exit_t = _avoid_vocal_region(
+                exit_t, vocals, a.beatgrid.phrase_times,
+                min_t=min_t, max_t=max_t,
+            )
     return float(exit_t)
 
 
@@ -133,12 +267,18 @@ def _phrase_entry(b: TrackAnalysis) -> float:
     if snapped <= 0 or snapped > b.duration * 0.4:
         snapped = nearest_beat(b.beatgrid.downbeat_times, entry) if len(b.beatgrid.downbeat_times) else entry
     snapped = float(max(0.0, snapped))
-    # vocal avoidance: prefer entering during an instrumental section
-    if b.features.vocal_regions:
-        snapped = _avoid_vocal_region(
-            snapped, b.features.vocal_regions, b.beatgrid.phrase_times,
-            min_t=0.0, max_t=b.duration * 0.4, direction="after",
-        )
+    vocals = b.features.vocal_regions or []
+    ecurve = b.features.energy_curve
+    if vocals:
+        candidates = [float(pt) for pt in b.beatgrid.phrase_times
+                      if 0.0 <= pt <= b.duration * 0.4]
+        if candidates and len(ecurve) > 0:
+            snapped = _best_exit_candidate(candidates, vocals, ecurve, b.duration, ideal=entry)
+        else:
+            snapped = _avoid_vocal_region(
+                snapped, vocals, b.beatgrid.phrase_times,
+                min_t=0.0, max_t=b.duration * 0.4, direction="after",
+            )
     return snapped
 
 
@@ -204,7 +344,11 @@ def plan_transition(
     overlap = float(clamp(overlap, 4.0, min(a.duration * 0.5, b.duration * 0.5, 45.0)))
 
     out_start = _phrase_exit(a, min_tail=overlap, use_half=use_half)
-    in_start = _phrase_entry(b)
+    if use_half:
+        pts = b.beatgrid.phrase_times
+        in_start = float(pts[0]) if len(pts) and pts[0] > 0 else 0.0
+    else:
+        in_start = _phrase_entry(b)
 
     # --- beatmatch feasibility (using chained effective tempos) ----------
     # The render pre-stretches whole decks to these effective tempos, so no extra
@@ -279,12 +423,14 @@ def plan_all_transitions(
 ) -> tuple[list[TransitionPlan], list[float]]:
     """Return (transition_plans, deck_rates) for an ordered set."""
     deck_rates = compute_deck_rates(ordered, settings)
-    use_half = settings.allow_half_tracks
     plans = []
     for i in range(len(ordered) - 1):
-        a_eff = ordered[i].bpm * deck_rates[i]
+        a = ordered[i]
+        use_half = (settings.is_half_track(a.path)
+                    and a.features.has_repeat and a.features.half_point > 0)
+        a_eff = a.bpm * deck_rates[i]
         b_eff = ordered[i + 1].bpm * deck_rates[i + 1]
-        plans.append(plan_transition(ordered[i], ordered[i + 1], settings,
+        plans.append(plan_transition(a, ordered[i + 1], settings,
                                      a_eff_bpm=a_eff, b_eff_bpm=b_eff,
                                      use_half=use_half))
     return plans, deck_rates

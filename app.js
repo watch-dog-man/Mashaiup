@@ -30,6 +30,9 @@ const i18n = {
     halfTrack: "Cắt nửa bài lặp",
     tipHalfTrack: "Tự động phát hiện bài có cấu trúc lặp (A-B-A-B) và chỉ chơi nửa đầu, mix sớm sang bài tiếp theo",
     halfTrackBadge: "½",
+    halfToggle: "½",
+    fullToggle: "FULL",
+    halfToggleTip: "Bấm để chuyển giữa half và full",
     presetAuto: "AI tự chọn",
     presetParty: "Tiệc tùng",
     presetChill: "Thư giãn",
@@ -153,6 +156,9 @@ const i18n = {
     halfTrack: "Half-track repeats",
     tipHalfTrack: "Auto-detect songs with repeating structure (A-B-A-B) and play only the first half, mixing out early into the next track",
     halfTrackBadge: "½",
+    halfToggle: "½",
+    fullToggle: "FULL",
+    halfToggleTip: "Click to toggle between half and full",
     presetAuto: "AI picks",
     presetParty: "Party",
     presetChill: "Chill",
@@ -290,6 +296,7 @@ const state = {
   targetBpm: 0,
   bpmData: null,
   bpmOrder: [],
+  halfTracks: new Set(),
 };
 
 /* ---------- helpers ---------- */
@@ -677,6 +684,7 @@ function collectSettings() {
     preserve_quality: $("#preserveQuality").checked,
     aggressive: $("#aggressive").checked,
     allow_half_tracks: $("#halfTrack").checked,
+    half_track_list: [...state.halfTracks],
     output_format: $("#outFormat").dataset.value,
     target_bpm: state.targetBpm || 0,
   };
@@ -725,6 +733,7 @@ function resetUI() {
   state.previewShown = false;
   state.lastTracklist = null;
   state.currentPlan = null;
+  state.halfTracks = new Set();
   finishSuccess._done = false;
   if (poll._t) { clearInterval(poll._t); poll._t = null; }
   const a = $("#audio");
@@ -880,6 +889,9 @@ function renderPlan(plan) {
   const jr = $("#journey");
   jr.innerHTML = "";
   state.currentPlan = plan;
+  if (plan.half_track_list) {
+    state.halfTracks = new Set(plan.half_track_list);
+  }
   const tracks = plan.tracks || [];
   const trans = plan.transition_details || [];
   tracks.forEach((t, i) => {
@@ -887,9 +899,13 @@ function renderPlan(plan) {
     li.draggable = true;
     li.dataset.idx = i;
     const td = trans[i];
+    const isHalf = state.halfTracks.has(t.path);
+    const halfBtn = t.has_repeat
+      ? `<button class="btn subtle j-half-btn ${isHalf ? "on" : ""}" data-idx="${i}" title="${tr("halfToggleTip")}">${isHalf ? tr("halfToggle") : tr("fullToggle")}</button>`
+      : "";
     li.innerHTML = `
       <span class="j-drag-handle" title="${tr("reorderHint")}">⠿</span>
-      <div class="j-title">${i + 1}. ${escapeHtml(t.title)} <span class="chip bpm">${t.bpm} BPM</span> <span class="chip key">${t.camelot}</span></div>
+      <div class="j-title">${i + 1}. ${escapeHtml(t.title)} <span class="chip bpm">${t.bpm} BPM</span> <span class="chip key">${t.camelot}</span> ${halfBtn}</div>
       ${td ? `<div class="j-transition">
               <div class="j-reason">${escapeHtml(td.reason)}</div>
               <span class="j-tech">${td.technique} · ${td.overlap}s ${td.beatmatched ? "· beatmatched" : ""}</span>
@@ -898,9 +914,11 @@ function renderPlan(plan) {
             </div>` : ""}`;
     jr.appendChild(li);
   });
-  // bind preview buttons
   jr.querySelectorAll(".j-preview-btn").forEach(btn => {
     btn.addEventListener("click", () => previewTransition(+btn.dataset.idx, btn));
+  });
+  jr.querySelectorAll(".j-half-btn").forEach(btn => {
+    btn.addEventListener("click", () => toggleHalfTrack(+btn.dataset.idx, btn));
   });
   bindJourneyDrag(jr);
 }
@@ -915,6 +933,7 @@ async function previewTransition(idx, btn) {
     return;
   }
   if (audioEl.src && audioEl.paused && audioEl.currentTime > 0) {
+    if (audioEl.ended) audioEl.currentTime = 0;
     audioEl.play();
     btn.textContent = `⏸ ${tr("previewBtn")}`;
     return;
@@ -935,6 +954,29 @@ async function previewTransition(idx, btn) {
   } catch (e) {
     toast(tr("previewFailed") + " " + (e.message || ""));
     btn.textContent = `▶ ${tr("previewBtn")}`;
+  }
+  btn.disabled = false;
+}
+
+async function toggleHalfTrack(idx, btn) {
+  btn.disabled = true;
+  try {
+    const res = await api("/api/toggle-half-track", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ track_index: idx }),
+    });
+    if (res.half_track_list) {
+      state.halfTracks = new Set(res.half_track_list);
+    }
+    if (res.plan) {
+      state.planRendered = false;
+      renderPlan({ ...state.currentPlan, ...res.plan });
+      state.planRendered = true;
+      if (state.previewShown) showPreviewControls();
+    }
+  } catch (e) {
+    toast(e.message || "Toggle failed");
   }
   btn.disabled = false;
 }
@@ -1054,7 +1096,9 @@ function copyTracklist() {
   const tl = state.lastTracklist;
   if (!tl) return;
   const text = buildTracklistText(tl.tracks, tl.duration);
-  navigator.clipboard.writeText(text).then(() => toast(tr("copiedTracklist")));
+  navigator.clipboard.writeText(text)
+    .then(() => toast(tr("copiedTracklist")))
+    .catch(() => toast("Copy failed — try selecting the text manually"));
 }
 
 function downloadTracklistImage() {

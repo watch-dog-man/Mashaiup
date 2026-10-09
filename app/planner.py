@@ -138,6 +138,7 @@ class MixPlan:
             a = self.analyses[idx]
             tracks.append({
                 "position": pos,
+                "path": a.path,
                 "title": a.title,
                 "artist": a.artist,
                 "bpm": round(safe_float(a.bpm), 1),
@@ -145,6 +146,9 @@ class MixPlan:
                 "camelot": a.key.camelot,
                 "energy": round(safe_float(a.features.energy), 3),
                 "duration": round(safe_float(a.duration), 1),
+                "has_repeat": a.features.has_repeat,
+                "half_point": round(safe_float(a.features.half_point), 1),
+                "repeat_score": round(safe_float(a.features.repeat_score), 3),
             })
         return {
             "tracks": tracks,

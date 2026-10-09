@@ -86,12 +86,16 @@ def run_mix_job(folder: str, settings: MixSettings, output_stub: str = "aidj_mix
                         message=f"Set ordered ({plan.energy_style} energy)")
 
         # ---- 4. transitions --------------------------------------------
+        if settings.allow_half_tracks and not settings.half_track_list:
+            settings.half_track_list = [a.path for a in ordered
+                                        if a.features.has_repeat and a.features.half_point > 0]
         PROGRESS.update(stage="transitions", stage_progress=0.3,
                         message="Designing beatmatched transitions…")
         plans, deck_rates = plan_all_transitions(ordered, settings)
         plan_dict = plan.to_dict()
         plan_dict["transition_details"] = [p.to_dict() for p in plans]
         plan_dict["deck_rates"] = [round(r, 4) for r in deck_rates]
+        plan_dict["half_track_list"] = list(settings.half_track_list)
         PROGRESS.update(stage="transitions", stage_progress=1.0, plan=plan_dict,
                         message=f"{len(plans)} transitions planned")
 

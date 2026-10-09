@@ -70,6 +70,10 @@ class ReorderRequest(BaseModel):
     order: list[int]
 
 
+class ToggleHalfRequest(BaseModel):
+    track_index: int
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -365,6 +369,53 @@ def create_app() -> FastAPI:
                         message="Reordered — preview or confirm to render")
 
         return {"ok": True, "plan": plan_dict}
+
+    @app.post("/api/toggle-half-track")
+    async def toggle_half_track(req: ToggleHalfRequest):
+        """Toggle a track between half and full mode, then re-plan."""
+        snap = PROGRESS.snapshot()
+        if snap.get("stage") != "previewing":
+            raise HTTPException(400, f"Not in preview stage (current: {snap.get('stage')})")
+        ps = PROGRESS.get_pipeline_state()
+        if ps is None:
+            raise HTTPException(400, "No pipeline state available.")
+        ordered = ps["ordered"]
+        settings = ps["settings"]
+        idx = req.track_index
+        if idx < 0 or idx >= len(ordered):
+            raise HTTPException(400, f"Invalid track index: {idx}")
+        track = ordered[idx]
+        if not track.features.has_repeat:
+            raise HTTPException(400, "Track has no repeat structure")
+
+        path = track.path
+        if path in settings.half_track_list:
+            settings.half_track_list.remove(path)
+        else:
+            settings.half_track_list.append(path)
+
+        from .transition_engine import plan_all_transitions
+
+        try:
+            plans, deck_rates = await asyncio.to_thread(
+                plan_all_transitions, ordered, settings
+            )
+        except Exception as e:
+            log.error("toggle-half re-plan failed: %s", e)
+            raise HTTPException(500, f"Re-plan failed: {e}")
+
+        ps["plans"] = plans
+        ps["deck_rates"] = deck_rates
+        PROGRESS.store_pipeline_state(ps)
+
+        plan_dict = snap.get("plan", {})
+        plan_dict["transition_details"] = [p.to_dict() for p in plans]
+        plan_dict["deck_rates"] = [round(r, 4) for r in deck_rates]
+        plan_dict["half_track_list"] = list(settings.half_track_list)
+        PROGRESS.update(stage="previewing", stage_progress=1.0, plan=plan_dict,
+                        message="Half-track updated — preview or confirm")
+
+        return {"ok": True, "plan": plan_dict, "half_track_list": list(settings.half_track_list)}
 
     @app.post("/api/upload")
     async def upload(files: list[UploadFile] = File(...)):

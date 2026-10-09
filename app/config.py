@@ -72,6 +72,14 @@ class MixSettings:
     normalize: bool = True
     target_bpm: float = 0.0              # 0 == auto (chained matching); >0 forces all tracks to this BPM
     allow_half_tracks: bool = False       # exit repeating tracks at the half-point instead of playing full
+    half_track_list: list = field(default_factory=list)  # paths of specific tracks to half (empty = all repeating)
+
+    def is_half_track(self, path: str) -> bool:
+        if not self.allow_half_tracks:
+            return False
+        if not self.half_track_list:
+            return True
+        return path in self.half_track_list
 
     def resolved(self) -> "MixSettings":
         """Return a copy with mode-dependent limits applied."""

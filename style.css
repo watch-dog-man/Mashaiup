@@ -362,6 +362,12 @@ input[type=range]::-webkit-slider-thumb:hover { box-shadow: 0 0 0 6px rgba(33,21
 .j-preview-btn { font-size: 11px !important; padding: 4px 12px !important; min-width: 0 !important;
   border-radius: 8px !important; white-space: nowrap; }
 .j-preview-audio { display: none; }
+.j-half-btn { font-size: 10px !important; padding: 2px 8px !important; min-width: 0 !important;
+  border-radius: 6px !important; font-weight: 700; font-family: var(--mono);
+  background: rgba(255,255,255,0.06); color: var(--ink-dim); border: 1px solid var(--glass-brd);
+  cursor: pointer; transition: all 0.2s; margin-left: 6px; vertical-align: middle; }
+.j-half-btn.on { color: #f0b040; background: rgba(240,176,64,0.18); border-color: rgba(240,176,64,0.4); }
+.j-half-btn:hover { transform: scale(1.08); }
 .confirm-row { margin-top: 22px; text-align: center; padding-top: 16px; border-top: 1px solid var(--glass-brd); }
 .confirm-row p { margin-bottom: 14px; }
 .confirm-render-btn { margin: 0 auto; }
