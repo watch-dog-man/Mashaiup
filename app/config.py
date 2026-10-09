@@ -49,7 +49,7 @@ LIMITER_CEILING_DB: float = -0.3    # sample-peak ceiling before dithered export
 MAX_ANALYSIS_SECONDS: float = 600.0   # only analyse first 10 min of very long files
 MIN_TRACK_SECONDS: float = 20.0       # tracks shorter than this can't be mixed well
 
-CACHE_VERSION: int = 4  # bump to invalidate all cached analyses (v4: mood/dance models)
+CACHE_VERSION: int = 5  # bump to invalidate all cached analyses (v5: vocal activity curve + regions)
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +71,7 @@ class MixSettings:
     output_format: str = "both"          # wav|mp3|both
     normalize: bool = True
     target_bpm: float = 0.0              # 0 == auto (chained matching); >0 forces all tracks to this BPM
+    allow_half_tracks: bool = False       # exit repeating tracks at the half-point instead of playing full
 
     def resolved(self) -> "MixSettings":
         """Return a copy with mode-dependent limits applied."""

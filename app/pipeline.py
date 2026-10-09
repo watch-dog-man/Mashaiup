@@ -99,7 +99,7 @@ def run_mix_job(folder: str, settings: MixSettings, output_stub: str = "aidj_mix
         try:
             report = {
                 "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "models": ms,       # vibe/mood/dance: which engine produced the analysis
+                "models": ms,
                 "settings": settings.__dict__,
                 "plan": plan_dict,
                 "tracks": [a.summary() for a in ordered],
@@ -107,6 +107,22 @@ def run_mix_job(folder: str, settings: MixSettings, output_stub: str = "aidj_mix
             dump_json(OUTPUTS_DIR / f"{output_stub}_report.json", report)
         except Exception as e:
             log.debug("report write failed: %s", e)
+
+        # ---- 4.5 preview gate -------------------------------------------
+        PROGRESS.store_pipeline_state({
+            "ordered": ordered,
+            "plans": plans,
+            "deck_rates": deck_rates,
+            "settings": settings,
+            "output_stub": output_stub,
+        })
+        PROGRESS.update(stage="previewing", stage_progress=1.0,
+                        message="Transitions ready — preview or confirm to render")
+        log.info("waiting for user to confirm render…")
+        confirmed = PROGRESS.wait_for_confirm(timeout=600.0)
+        if not confirmed:
+            PROGRESS.fail("Render not confirmed within timeout.")
+            return {}
 
         # ---- 5. render --------------------------------------------------
         PROGRESS.update(stage="rendering", stage_progress=0.0,

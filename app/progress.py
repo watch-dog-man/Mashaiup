@@ -15,16 +15,16 @@ log = get_logger()
 
 STAGES = [
     "idle", "scanning", "metadata", "analysis", "planning",
-    "transitions", "rendering", "finalizing", "complete", "error",
+    "transitions", "previewing", "rendering", "finalizing", "complete", "error",
 ]
 
 # rough weights so the overall bar advances sensibly across stages
 _STAGE_WEIGHT = {
     "scanning": 0.03, "metadata": 0.02, "analysis": 0.55, "planning": 0.05,
-    "transitions": 0.05, "rendering": 0.25, "finalizing": 0.05,
+    "transitions": 0.05, "previewing": 0.0, "rendering": 0.25, "finalizing": 0.05,
 }
 _STAGE_ORDER = ["scanning", "metadata", "analysis", "planning",
-                "transitions", "rendering", "finalizing"]
+                "transitions", "previewing", "rendering", "finalizing"]
 
 
 @dataclass
@@ -69,11 +69,30 @@ class ProgressManager:
     def __init__(self):
         self._lock = threading.Lock()
         self._job: Optional[JobState] = None
+        self._confirm_event = threading.Event()
+        self._pipeline_state: Optional[dict] = None
 
     def start(self, job_id: str) -> JobState:
         with self._lock:
+            self._confirm_event.clear()
+            self._pipeline_state = None
             self._job = JobState(job_id=job_id, stage="scanning", message="Starting…")
             return self._job
+
+    def store_pipeline_state(self, state: dict) -> None:
+        with self._lock:
+            self._pipeline_state = state
+
+    def get_pipeline_state(self) -> Optional[dict]:
+        with self._lock:
+            return self._pipeline_state
+
+    def wait_for_confirm(self, timeout: float = 600.0) -> bool:
+        self._confirm_event.clear()
+        return self._confirm_event.wait(timeout=timeout)
+
+    def confirm_render(self) -> None:
+        self._confirm_event.set()
 
     @property
     def job(self) -> Optional[JobState]:

@@ -131,6 +131,24 @@
         </div>
       </div>
 
+      <div class="preset-row" id="presetRow">
+        <button class="preset-btn on" data-preset="auto">
+          <span class="preset-icon">🤖</span><span class="preset-name" data-i18n="presetAuto">AI tự chọn</span>
+        </button>
+        <button class="preset-btn" data-preset="party">
+          <span class="preset-icon">🎉</span><span class="preset-name" data-i18n="presetParty">Tiệc tùng</span>
+        </button>
+        <button class="preset-btn" data-preset="chill">
+          <span class="preset-icon">🌊</span><span class="preset-name" data-i18n="presetChill">Thư giãn</span>
+        </button>
+        <button class="preset-btn" data-preset="workout">
+          <span class="preset-icon">💪</span><span class="preset-name" data-i18n="presetWorkout">Tập gym</span>
+        </button>
+        <button class="preset-btn" data-preset="roadtrip">
+          <span class="preset-icon">🚗</span><span class="preset-name" data-i18n="presetRoadtrip">Đường dài</span>
+        </button>
+      </div>
+
       <div class="settings-grid" id="settingsBody">
         <div class="ctrl" data-tip-key="tipEnergy">
           <label data-i18n="energyJourney">Hành trình năng lượng</label>
@@ -173,6 +191,10 @@
             <input type="checkbox" id="aggressive" />
             <span class="track"></span><span class="switch-label" data-i18n="aggressiveRemix">Remix mạnh</span>
           </label>
+          <label class="switch" data-tip-key="tipHalfTrack">
+            <input type="checkbox" id="halfTrack" />
+            <span class="track"></span><span class="switch-label" data-i18n="halfTrack">Cắt nửa bài lặp</span>
+          </label>
         </div>
 
         <div class="ctrl" data-tip-key="tipOutputFormat">
@@ -210,6 +232,7 @@
         <span class="stage-chip" data-s="analysis" data-i18n="stageAnalysis">Phân tích</span>
         <span class="stage-chip" data-s="planning" data-i18n="stagePlan">Lên kế hoạch</span>
         <span class="stage-chip" data-s="transitions" data-i18n="stageTransitions">Chuyển tiếp</span>
+        <span class="stage-chip" data-s="previewing" data-i18n="stagePreview">Nghe thử</span>
         <span class="stage-chip" data-s="rendering" data-i18n="stageRender">Dựng mix</span>
         <span class="stage-chip" data-s="finalizing" data-i18n="stageFinalise">Hoàn tất</span>
       </div>
@@ -291,6 +314,14 @@
         <a class="btn primary" id="dlWav" download data-i18n="dlWav">Tải WAV</a>
         <a class="btn ghost" id="dlMp3" download data-i18n="dlMp3">Tải MP3</a>
         <div class="check-badges" id="checkBadges"></div>
+      </div>
+      <div class="tracklist-export" id="tracklistExport" hidden>
+        <h3 data-i18n="exportTracklist">Xuất tracklist</h3>
+        <pre class="tracklist-text" id="tracklistText"></pre>
+        <div class="tracklist-actions">
+          <button class="btn subtle" id="copyTracklistBtn" data-i18n="copyTracklist">Sao chép</button>
+          <button class="btn subtle" id="dlTracklistImg" data-i18n="downloadImage">Tải ảnh</button>
+        </div>
       </div>
     </section>
 

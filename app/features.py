@@ -50,6 +50,12 @@ class TrackFeatures:
     outro_start: float             # s
     mix_in_point: float            # good place for the *next* track to start under
     mix_out_point: float           # good place to start leaving this track
+    has_repeat: bool = False       # track has a repeating structure (A-B-A-B)
+    half_point: float = 0.0       # best mid-song exit time if has_repeat
+    repeat_score: float = 0.0     # 0..1 confidence in the repetition detection
+    repeat_map: list = field(default_factory=list)  # per-section repeat scores
+    vocal_activity: np.ndarray = field(default_factory=lambda: np.zeros(128, dtype=np.float32))
+    vocal_regions: list = field(default_factory=list)  # [[start_s, end_s], ...]
 
     def to_dict(self) -> dict:
         return {
@@ -69,6 +75,12 @@ class TrackFeatures:
             "outro_start": safe_float(self.outro_start),
             "mix_in_point": safe_float(self.mix_in_point),
             "mix_out_point": safe_float(self.mix_out_point),
+            "has_repeat": self.has_repeat,
+            "half_point": safe_float(self.half_point),
+            "repeat_score": safe_float(self.repeat_score),
+            "repeat_map": self.repeat_map,
+            "vocal_activity": np.round(self.vocal_activity, 4).tolist(),
+            "vocal_regions": self.vocal_regions,
         }
 
     @staticmethod
@@ -86,6 +98,12 @@ class TrackFeatures:
             outro_start=d["outro_start"],
             mix_in_point=d.get("mix_in_point", d["intro_end"]),
             mix_out_point=d.get("mix_out_point", d["outro_start"]),
+            has_repeat=d.get("has_repeat", False),
+            half_point=d.get("half_point", 0.0),
+            repeat_score=d.get("repeat_score", 0.0),
+            repeat_map=d.get("repeat_map", []),
+            vocal_activity=np.asarray(d.get("vocal_activity", np.zeros(128)), dtype=np.float32),
+            vocal_regions=d.get("vocal_regions", []),
         )
 
 
@@ -130,11 +148,13 @@ def _energy_curve(y: np.ndarray, sr: int, n_points: int = 128) -> tuple[np.ndarr
     return rms_db.astype(np.float32), times.astype(np.float32), curve.astype(np.float32)
 
 
-def _vocalness(y: np.ndarray, sr: int) -> float:
+def _vocal_analysis(
+    y: np.ndarray, sr: int, duration: float, n_points: int = 128
+) -> tuple[float, np.ndarray, list]:
     """
-    Cheap vocal-presence proxy: harmonic-percussive separation, then measure how
-    much energy sits in the 300 Hz–3.4 kHz "voice" band of the harmonic part,
-    combined with spectral-flatness (voiced content is less flat / noisy).
+    Vocal analysis: HPSS once, then compute both the scalar vocalness AND a
+    time-resolved vocal activity curve + discrete vocal regions.
+    Returns (vocalness_scalar, vocal_activity_curve, vocal_regions).
     """
     try:
         h = librosa.effects.harmonic(y, margin=3.0)
@@ -142,10 +162,57 @@ def _vocalness(y: np.ndarray, sr: int) -> float:
         h = y
     S = np.abs(librosa.stft(h, n_fft=N_FFT, hop_length=HOP_LENGTH)) ** 2
     freqs = librosa.fft_frequencies(sr=sr, n_fft=N_FFT)
-    band = S[(freqs >= 300) & (freqs <= 3400)].sum() / (S.sum() + 1e-9)
+    vocal_mask = (freqs >= 300) & (freqs <= 3400)
+
+    # --- scalar vocalness (original logic) ---
+    band_total = S[vocal_mask].sum() / (S.sum() + 1e-9)
     flat = float(np.mean(librosa.feature.spectral_flatness(y=h)))
-    score = 0.7 * band + 0.3 * (1.0 - np.clip(flat * 4, 0, 1))
-    return float(np.clip(score, 0.0, 1.0))
+    scalar = 0.7 * band_total + 0.3 * (1.0 - np.clip(flat * 4, 0, 1))
+    scalar = float(np.clip(scalar, 0.0, 1.0))
+
+    # --- per-frame vocal activity curve ---
+    vocal_energy = S[vocal_mask].sum(axis=0)
+    total_energy = S.sum(axis=0) + 1e-9
+    vocal_ratio = vocal_energy / total_energy
+
+    flatness = librosa.feature.spectral_flatness(y=h, n_fft=N_FFT, hop_length=HOP_LENGTH)[0]
+    tonal = 1.0 - np.clip(flatness * 4, 0, 1)
+    raw = 0.7 * vocal_ratio[:len(tonal)] + 0.3 * tonal[:len(vocal_ratio)]
+    raw = np.clip(raw, 0.0, 1.0)
+
+    if len(raw) >= n_points:
+        idx = np.linspace(0, len(raw) - 1, n_points).astype(int)
+        curve = raw[idx]
+    else:
+        curve = np.interp(np.linspace(0, 1, n_points), np.linspace(0, 1, len(raw)), raw)
+    kernel = np.ones(5) / 5
+    curve = np.convolve(curve, kernel, mode="same").astype(np.float32)
+
+    # --- vocal regions (contiguous spans above threshold) ---
+    threshold = 0.40
+    t = np.linspace(0, duration, len(curve))
+    active = curve >= threshold
+    regions: list[list[float]] = []
+    in_region = False
+    start = 0.0
+    for i, a in enumerate(active):
+        if a and not in_region:
+            start = float(t[i])
+            in_region = True
+        elif not a and in_region:
+            regions.append([round(start, 2), round(float(t[i]), 2)])
+            in_region = False
+    if in_region:
+        regions.append([round(start, 2), round(float(t[-1]), 2)])
+    # merge short gaps (< 2s) between vocal regions
+    merged: list[list[float]] = []
+    for r in regions:
+        if merged and r[0] - merged[-1][1] < 2.0:
+            merged[-1][1] = r[1]
+        else:
+            merged.append(r)
+
+    return scalar, curve, merged
 
 
 def _danceability(y: np.ndarray, sr: int, onset_rate: float) -> float:
@@ -217,7 +284,7 @@ def analyze_features(y: np.ndarray, sr: int, beat_period: float | None = None) -
 
     energy = float(np.clip(np.mean(energy_curve) * 1.2, 0.0, 1.0))
     dance = _danceability(y, sr, onset_rate)
-    vocal = _vocalness(y, sr)
+    vocal, vocal_curve, vocal_regions = _vocal_analysis(y, sr, duration)
     sections = _sections(y, sr, duration)
 
     # intro/outro from the energy curve: intro = first sustained rise, outro =
@@ -239,4 +306,5 @@ def analyze_features(y: np.ndarray, sr: int, beat_period: float | None = None) -
         spectral_balance=balance, onset_rate=onset_rate, danceability=dance,
         vocalness=vocal, sections=sections, intro_end=intro_end,
         outro_start=outro_start, mix_in_point=mix_in, mix_out_point=mix_out,
+        vocal_activity=vocal_curve, vocal_regions=vocal_regions,
     )

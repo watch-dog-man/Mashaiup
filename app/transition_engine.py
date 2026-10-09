@@ -64,13 +64,52 @@ class TransitionPlan:
         }
 
 
-def _phrase_exit(a: TrackAnalysis, min_tail: float) -> float:
+def _in_vocal_region(t: float, regions: list, margin: float = 1.0) -> bool:
+    """Check if time t falls inside any vocal region (with margin)."""
+    for r in regions:
+        if r[0] - margin <= t <= r[1] + margin:
+            return True
+    return False
+
+
+def _avoid_vocal_region(
+    t: float, regions: list, phrase_times: np.ndarray,
+    min_t: float, max_t: float, direction: str = "before",
+) -> float:
+    """If t is inside a vocal region, try nearby phrase boundaries that aren't."""
+    if not regions or not _in_vocal_region(t, regions):
+        return t
+    candidates = []
+    for pt in phrase_times:
+        if min_t <= pt <= max_t and not _in_vocal_region(pt, regions):
+            candidates.append((abs(pt - t), pt))
+    if candidates:
+        candidates.sort()
+        return float(candidates[0][1])
+    return t
+
+
+def _phrase_exit(a: TrackAnalysis, min_tail: float, use_half: bool = False) -> float:
     """
     Choose where A starts leaving: near its mix-out point, snapped to a phrase
     boundary, guaranteeing at least `min_tail` seconds remain before the track
     ends so the whole blend has material.
+
+    When use_half=True and the track has a repeating structure, exit near
+    the half-point instead of the outro — the DJ plays only the first pass
+    of the repeated material.
     """
     dur = a.duration
+    if use_half and a.features.has_repeat and a.features.half_point > 0:
+        ideal = a.features.half_point
+        ideal = max(ideal, min_tail + 2.0)
+        exit_t = nearest_phrase(a.beatgrid.phrase_times, ideal, prefer="before")
+        if exit_t + min_tail > dur:
+            exit_t = nearest_phrase(a.beatgrid.phrase_times, dur - min_tail - 0.5, prefer="before")
+        if exit_t + min_tail > dur or exit_t <= 0:
+            exit_t = max(0.0, ideal - 0.5)
+        return float(exit_t)
+
     ideal = min(a.features.mix_out_point, dur - min_tail - 0.5)
     ideal = max(ideal, dur * 0.4)                      # don't leave absurdly early
     exit_t = nearest_phrase(a.beatgrid.phrase_times, ideal, prefer="before")
@@ -78,6 +117,12 @@ def _phrase_exit(a: TrackAnalysis, min_tail: float) -> float:
         exit_t = nearest_phrase(a.beatgrid.phrase_times, dur - min_tail - 0.5, prefer="before")
     if exit_t + min_tail > dur or exit_t <= 0:         # phrase grid unusable -> raw
         exit_t = max(0.0, dur - min_tail - 0.5)
+    # vocal avoidance: slide away from vocal sections
+    if a.features.vocal_regions:
+        exit_t = _avoid_vocal_region(
+            exit_t, a.features.vocal_regions, a.beatgrid.phrase_times,
+            min_t=dur * 0.4, max_t=dur - min_tail,
+        )
     return float(exit_t)
 
 
@@ -87,7 +132,14 @@ def _phrase_entry(b: TrackAnalysis) -> float:
     snapped = nearest_phrase(b.beatgrid.phrase_times, entry, prefer="after")
     if snapped <= 0 or snapped > b.duration * 0.4:
         snapped = nearest_beat(b.beatgrid.downbeat_times, entry) if len(b.beatgrid.downbeat_times) else entry
-    return float(max(0.0, snapped))
+    snapped = float(max(0.0, snapped))
+    # vocal avoidance: prefer entering during an instrumental section
+    if b.features.vocal_regions:
+        snapped = _avoid_vocal_region(
+            snapped, b.features.vocal_regions, b.beatgrid.phrase_times,
+            min_t=0.0, max_t=b.duration * 0.4, direction="after",
+        )
+    return snapped
 
 
 def compute_deck_rates(ordered: list[TrackAnalysis], settings: MixSettings) -> list[float]:
@@ -136,6 +188,7 @@ def plan_transition(
     settings: MixSettings,
     a_eff_bpm: float | None = None,
     b_eff_bpm: float | None = None,
+    use_half: bool = False,
 ) -> TransitionPlan:
     settings = settings.resolved()
     a_eff_bpm = a_eff_bpm if a_eff_bpm else a.bpm
@@ -150,7 +203,7 @@ def plan_transition(
     # keep overlap sane vs track lengths
     overlap = float(clamp(overlap, 4.0, min(a.duration * 0.5, b.duration * 0.5, 45.0)))
 
-    out_start = _phrase_exit(a, min_tail=overlap)
+    out_start = _phrase_exit(a, min_tail=overlap, use_half=use_half)
     in_start = _phrase_entry(b)
 
     # --- beatmatch feasibility (using chained effective tempos) ----------
@@ -204,7 +257,7 @@ def plan_transition(
             effects["echo_throw"] = {"beats": 2, "feedback": 0.45, "wet": 0.4 + 0.3 * fx_amt}
             effects["reverb_tail"] = {"decay": 1.4, "wet": 0.2 + 0.2 * fx_amt}
         # re-snap exit with the shorter tail requirement
-        out_start = _phrase_exit(a, min_tail=overlap)
+        out_start = _phrase_exit(a, min_tail=overlap, use_half=use_half)
 
     if settings.effect_intensity > 0.6 and technique in ("harmonic_blend", "eq_blend"):
         effects["stereo_glue"] = True
@@ -226,10 +279,12 @@ def plan_all_transitions(
 ) -> tuple[list[TransitionPlan], list[float]]:
     """Return (transition_plans, deck_rates) for an ordered set."""
     deck_rates = compute_deck_rates(ordered, settings)
+    use_half = settings.allow_half_tracks
     plans = []
     for i in range(len(ordered) - 1):
         a_eff = ordered[i].bpm * deck_rates[i]
         b_eff = ordered[i + 1].bpm * deck_rates[i + 1]
         plans.append(plan_transition(ordered[i], ordered[i + 1], settings,
-                                     a_eff_bpm=a_eff, b_eff_bpm=b_eff))
+                                     a_eff_bpm=a_eff, b_eff_bpm=b_eff,
+                                     use_half=use_half))
     return plans, deck_rates

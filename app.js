@@ -27,13 +27,37 @@ const i18n = {
     useEveryTrack: "0 = dùng tất cả bài",
     preserveQuality: "Giữ chất lượng",
     aggressiveRemix: "Remix mạnh",
+    halfTrack: "Cắt nửa bài lặp",
+    tipHalfTrack: "Tự động phát hiện bài có cấu trúc lặp (A-B-A-B) và chỉ chơi nửa đầu, mix sớm sang bài tiếp theo",
+    halfTrackBadge: "½",
+    presetAuto: "AI tự chọn",
+    presetParty: "Tiệc tùng",
+    presetChill: "Thư giãn",
+    presetWorkout: "Tập gym",
+    presetRoadtrip: "Đường dài",
+    presetHint: "Chọn phong cách — AI tự điều chỉnh tất cả. Hoặc chỉnh tay bên dưới.",
+    vocalBadgeTip: "Phát hiện đoạn có vocal — AI tự tránh mix chồng lời",
+    reorderHint: "Kéo ⠿ để đổi thứ tự bài. AI sẽ tự lên kế hoạch lại.",
+    reordering: "Đang sắp xếp lại…",
+    reorderFailed: "Sắp xếp lại thất bại:",
+    exportTracklist: "Xuất tracklist",
+    copyTracklist: "Sao chép",
+    downloadImage: "Tải ảnh",
+    copiedTracklist: "Đã sao chép tracklist!",
+    previewingTransitions: "Nghe thử chuyển tiếp",
+    previewBtn: "Nghe thử",
+    previewTip: "Nghe thử đoạn chuyển tiếp này (~12 giây)",
+    previewLoading: "Đang render…",
+    previewFailed: "Không render được preview:",
+    previewHint: "Bấm ▶ để nghe thử từng đoạn chuyển tiếp. Hài lòng thì bấm nút bên dưới.",
+    confirmRender: "Xác nhận & Render bản mix",
     outputFormat: "Định dạng xuất",
     generateMix: "Tạo bản mix",
     working: "Đang xử lý…",
     startingEngine: "Đang khởi động.",
     stageScan: "Quét", stageMetadata: "Metadata", stageAnalysis: "Phân tích",
     stagePlan: "Lên kế hoạch", stageTransitions: "Chuyển tiếp",
-    stageRender: "Dựng mix", stageFinalise: "Hoàn tất",
+    stagePreview: "Nghe thử", stageRender: "Dựng mix", stageFinalise: "Hoàn tất",
     elapsed: "đã trôi qua", remaining: "còn lại",
     detectedTracks: "Bài nhạc đã phát hiện",
     detectedTracksDesc: "BPM, tông, năng lượng và phong cách được trích xuất từng bài.",
@@ -126,13 +150,37 @@ const i18n = {
     useEveryTrack: "0 = use every track",
     preserveQuality: "Preserve quality",
     aggressiveRemix: "Aggressive remix",
+    halfTrack: "Half-track repeats",
+    tipHalfTrack: "Auto-detect songs with repeating structure (A-B-A-B) and play only the first half, mixing out early into the next track",
+    halfTrackBadge: "½",
+    presetAuto: "AI picks",
+    presetParty: "Party",
+    presetChill: "Chill",
+    presetWorkout: "Workout",
+    presetRoadtrip: "Road trip",
+    presetHint: "Pick a vibe — AI handles the rest. Or fine-tune below.",
+    vocalBadgeTip: "Vocal sections detected — AI avoids overlapping vocals during transitions",
+    reorderHint: "Drag ⠿ to reorder tracks. AI will re-plan transitions.",
+    reordering: "Reordering…",
+    reorderFailed: "Reorder failed:",
+    exportTracklist: "Export tracklist",
+    copyTracklist: "Copy",
+    downloadImage: "Download image",
+    copiedTracklist: "Tracklist copied!",
+    previewingTransitions: "Preview transitions",
+    previewBtn: "Preview",
+    previewTip: "Listen to this transition (~12 seconds)",
+    previewLoading: "Rendering…",
+    previewFailed: "Preview render failed:",
+    previewHint: "Press ▶ to preview each transition. When satisfied, confirm below.",
+    confirmRender: "Confirm & Render full mix",
     outputFormat: "Output format",
     generateMix: "Generate the mix",
     working: "Working…",
     startingEngine: "Starting the engine.",
     stageScan: "Scan", stageMetadata: "Metadata", stageAnalysis: "Analyse",
     stagePlan: "Plan", stageTransitions: "Transitions",
-    stageRender: "Render", stageFinalise: "Finalise",
+    stagePreview: "Preview", stageRender: "Render", stageFinalise: "Finalise",
     elapsed: "elapsed", remaining: "remaining",
     detectedTracks: "Detected tracks",
     detectedTracksDesc: "BPM, key, energy and vibe extracted per track.",
@@ -579,6 +627,46 @@ $$(".segmented").forEach((seg) =>
   )
 );
 
+/* ---------- presets ---------- */
+const PRESETS = {
+  auto:     { energy: "rising",  trans: 55, fx: 45, harm: 60, len: 0, quality: true,  aggro: false, half: false },
+  party:    { energy: "rising",  trans: 65, fx: 55, harm: 50, len: 0, quality: true,  aggro: false, half: true  },
+  chill:    { energy: "wave",    trans: 70, fx: 25, harm: 80, len: 0, quality: true,  aggro: false, half: false },
+  workout:  { energy: "flat",    trans: 35, fx: 60, harm: 35, len: 0, quality: false, aggro: true,  half: true  },
+  roadtrip: { energy: "wave",    trans: 55, fx: 35, harm: 65, len: 0, quality: true,  aggro: false, half: false },
+};
+
+function applyPreset(name) {
+  const p = PRESETS[name];
+  if (!p) return;
+  // energy curve
+  const seg = $("#energyCurve");
+  seg.dataset.value = p.energy;
+  seg.querySelectorAll("button").forEach(b => {
+    b.classList.toggle("on", b.dataset.v === p.energy);
+  });
+  // sliders
+  const setSlider = (id, val) => {
+    const el = $(id);
+    el.value = val;
+    el.dispatchEvent(new Event("input"));
+  };
+  setSlider("#transIntensity", p.trans);
+  setSlider("#fxIntensity", p.fx);
+  setSlider("#harmPriority", p.harm);
+  setSlider("#mixLength", p.len);
+  // toggles
+  $("#preserveQuality").checked = p.quality;
+  $("#aggressive").checked = p.aggro;
+  $("#halfTrack").checked = p.half;
+  // highlight active preset button
+  $$(".preset-btn").forEach(b => b.classList.toggle("on", b.dataset.preset === name));
+}
+
+$$(".preset-btn").forEach(btn =>
+  btn.addEventListener("click", () => applyPreset(btn.dataset.preset))
+);
+
 function collectSettings() {
   return {
     energy_curve: $("#energyCurve").dataset.value,
@@ -588,6 +676,7 @@ function collectSettings() {
     target_minutes: +$("#mixLength").value,
     preserve_quality: $("#preserveQuality").checked,
     aggressive: $("#aggressive").checked,
+    allow_half_tracks: $("#halfTrack").checked,
     output_format: $("#outFormat").dataset.value,
     target_bpm: state.targetBpm || 0,
   };
@@ -630,8 +719,12 @@ function resetUI() {
   $("#trackList").innerHTML = "";
   $("#journey").innerHTML = "";
   $("#warnings").innerHTML = "";
+  $("#tracklistExport").hidden = true;
   state.trackCount = 0;
   state.planRendered = false;
+  state.previewShown = false;
+  state.lastTracklist = null;
+  state.currentPlan = null;
   finishSuccess._done = false;
   if (poll._t) { clearInterval(poll._t); poll._t = null; }
   const a = $("#audio");
@@ -662,7 +755,7 @@ function poll() {
   }, 500);
 }
 
-const STAGE_ORDER = ["scanning", "metadata", "analysis", "planning", "transitions", "rendering", "finalizing"];
+const STAGE_ORDER = ["scanning", "metadata", "analysis", "planning", "transitions", "previewing", "rendering", "finalizing"];
 
 function handleSnapshot(snap) {
   // progress bar
@@ -703,6 +796,12 @@ function handleSnapshot(snap) {
     state.planRendered = true;
   }
 
+  // preview stage — show confirm button
+  if (snap.stage === "previewing" && !state.previewShown) {
+    state.previewShown = true;
+    showPreviewControls();
+  }
+
   if (snap.stage === "error" || snap.error) {
     finishError(snap.error || snap.message);
   } else if (snap.done && snap.result) {
@@ -714,8 +813,9 @@ function titleForStage(s) {
   return {
     scanning: tr("scanningFolder"), metadata: tr("readingMetadata"),
     analysis: tr("analysingTracks"), planning: tr("planningSet"),
-    transitions: tr("designingTransitions"), rendering: tr("renderingMix"),
-    finalizing: tr("finalising"), complete: tr("complete"), error: tr("error"),
+    transitions: tr("designingTransitions"), previewing: tr("previewingTransitions"),
+    rendering: tr("renderingMix"), finalizing: tr("finalising"),
+    complete: tr("complete"), error: tr("error"),
   }[s] || tr("working");
 }
 
@@ -754,6 +854,8 @@ function renderTracks(tracks) {
         <span class="chip bpm">${t.bpm ? t.bpm.toFixed(0) : "?"} BPM</span>
         <span class="chip key">${t.camelot || "?"}</span>
         <span class="chip">E ${Math.round((t.energy || 0) * 100)}</span>
+        ${t.has_repeat ? `<span class="chip half" title="${tr("tipHalfTrack")} (${Math.round(t.repeat_score * 100)}%)">${tr("halfTrackBadge")} ${Math.round(t.half_point)}s</span>` : ""}
+        ${t.vocal_regions && t.vocal_regions.length ? `<span class="chip vocal" title="${tr("vocalBadgeTip")}">🎤 ${t.vocal_regions.length}</span>` : ""}
         <div class="spark">${sparkline(t.energy_curve)}</div>
       </div>`;
     list.appendChild(row);
@@ -777,16 +879,243 @@ function renderPlan(plan) {
     `${plan.n_tracks} tracks · ${plan.energy_style} energy · ~${Math.round(plan.est_duration / 60)} min`;
   const jr = $("#journey");
   jr.innerHTML = "";
+  state.currentPlan = plan;
   const tracks = plan.tracks || [];
   const trans = plan.transition_details || [];
   tracks.forEach((t, i) => {
     const li = document.createElement("li");
-    const tr = trans[i];
+    li.draggable = true;
+    li.dataset.idx = i;
+    const td = trans[i];
     li.innerHTML = `
+      <span class="j-drag-handle" title="${tr("reorderHint")}">⠿</span>
       <div class="j-title">${i + 1}. ${escapeHtml(t.title)} <span class="chip bpm">${t.bpm} BPM</span> <span class="chip key">${t.camelot}</span></div>
-      ${tr ? `<div class="j-reason">${escapeHtml(tr.reason)}</div>
-              <span class="j-tech">${tr.technique} · ${tr.overlap}s ${tr.beatmatched ? "· beatmatched" : ""}</span>` : ""}`;
+      ${td ? `<div class="j-transition">
+              <div class="j-reason">${escapeHtml(td.reason)}</div>
+              <span class="j-tech">${td.technique} · ${td.overlap}s ${td.beatmatched ? "· beatmatched" : ""}</span>
+              <button class="btn subtle j-preview-btn" data-idx="${i}" title="${tr("previewTip")}">▶ ${tr("previewBtn")}</button>
+              <audio class="j-preview-audio" data-idx="${i}" preload="none"></audio>
+            </div>` : ""}`;
     jr.appendChild(li);
+  });
+  // bind preview buttons
+  jr.querySelectorAll(".j-preview-btn").forEach(btn => {
+    btn.addEventListener("click", () => previewTransition(+btn.dataset.idx, btn));
+  });
+  bindJourneyDrag(jr);
+}
+
+async function previewTransition(idx, btn) {
+  const audioEl = $(`.j-preview-audio[data-idx="${idx}"]`);
+  if (!audioEl) return;
+  // if already loaded and playing, toggle pause
+  if (audioEl.src && !audioEl.paused) {
+    audioEl.pause();
+    btn.textContent = `▶ ${tr("previewBtn")}`;
+    return;
+  }
+  if (audioEl.src && audioEl.paused && audioEl.currentTime > 0) {
+    audioEl.play();
+    btn.textContent = `⏸ ${tr("previewBtn")}`;
+    return;
+  }
+  // fetch preview
+  btn.disabled = true;
+  btn.textContent = `⏳ ${tr("previewLoading")}`;
+  try {
+    const res = await api("/api/preview-transition", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transition_index: idx }),
+    });
+    audioEl.src = res.url;
+    audioEl.play();
+    btn.textContent = `⏸ ${tr("previewBtn")}`;
+    audioEl.onended = () => { btn.textContent = `▶ ${tr("previewBtn")}`; };
+  } catch (e) {
+    toast(tr("previewFailed") + " " + (e.message || ""));
+    btn.textContent = `▶ ${tr("previewBtn")}`;
+  }
+  btn.disabled = false;
+}
+
+function showPreviewControls() {
+  // add confirm button below the journey
+  const plan = $("#planCard");
+  if (plan.querySelector(".confirm-row")) return;
+  const row = document.createElement("div");
+  row.className = "confirm-row";
+  row.innerHTML = `
+    <p class="muted small">${tr("previewHint")}</p>
+    <button class="btn generate confirm-render-btn" id="confirmRenderBtn">
+      <span class="btn-glow"></span>
+      <span>${tr("confirmRender")}</span>
+    </button>`;
+  plan.appendChild(row);
+  plan.scrollIntoView({ behavior: "smooth", block: "end" });
+  $("#confirmRenderBtn").addEventListener("click", confirmRender);
+}
+
+async function confirmRender() {
+  const btn = $("#confirmRenderBtn");
+  if (!btn) return;
+  btn.disabled = true;
+  btn.querySelector("span:last-child").textContent = tr("renderingMix");
+  try {
+    await api("/api/confirm-render", { method: "POST" });
+  } catch (e) {
+    toast(e.message || "Confirm failed");
+    btn.disabled = false;
+    btn.querySelector("span:last-child").textContent = tr("confirmRender");
+  }
+}
+
+/* ---------- journey drag reorder ---------- */
+function bindJourneyDrag(jr) {
+  jr.querySelectorAll("li").forEach(li => {
+    li.addEventListener("dragstart", (e) => {
+      li.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", li.dataset.idx);
+    });
+    li.addEventListener("dragend", () => {
+      li.classList.remove("dragging");
+      reorderJourneyFromDOM(jr);
+    });
+    li.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      const dragging = jr.querySelector(".dragging");
+      if (!dragging || dragging === li) return;
+      const rect = li.getBoundingClientRect();
+      const after = e.clientY > rect.top + rect.height / 2;
+      if (after) li.after(dragging); else li.before(dragging);
+    });
+  });
+  if (!jr._dropBound) {
+    jr.addEventListener("dragover", (e) => e.preventDefault());
+    jr.addEventListener("drop", (e) => e.preventDefault());
+    jr._dropBound = true;
+  }
+}
+
+async function reorderJourneyFromDOM(jr) {
+  const items = [...jr.querySelectorAll("li")];
+  const newOrder = items.map(li => +li.dataset.idx);
+  const isIdentity = newOrder.every((v, i) => v === i);
+  if (isIdentity) return;
+  // update indices display
+  items.forEach((li, i) => {
+    const title = li.querySelector(".j-title");
+    if (title) title.textContent = title.textContent.replace(/^\d+\./, `${i + 1}.`);
+  });
+  // call backend to re-plan
+  const confirmBtn = $("#confirmRenderBtn");
+  if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.querySelector("span:last-child").textContent = tr("reordering"); }
+  try {
+    const res = await api("/api/reorder-journey", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ order: newOrder }),
+    });
+    state.planRendered = false;
+    renderPlan(res.plan);
+    state.planRendered = true;
+    if (state.previewShown) showPreviewControls();
+  } catch (e) {
+    toast(tr("reorderFailed") + " " + (e.message || ""));
+  }
+  if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.querySelector("span:last-child").textContent = tr("confirmRender"); }
+}
+
+/* ---------- tracklist export ---------- */
+function fmtTimestamp(s) {
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+}
+
+function buildTracklistText(tracklist, duration) {
+  const date = new Date().toLocaleDateString();
+  let text = `Mashaiup Mix — ${date}\n`;
+  text += "─".repeat(40) + "\n";
+  tracklist.forEach(t => {
+    const idx = String(t.index).padStart(2, "0");
+    const time = fmtTimestamp(t.start);
+    const artist = t.artist && t.artist !== "Unknown" ? ` — ${t.artist}` : "";
+    text += `${idx}. ${time}  ${t.title}${artist}  (${t.bpm} BPM, ${t.camelot})\n`;
+  });
+  text += "─".repeat(40) + "\n";
+  text += `Total: ${fmtTimestamp(duration)} · ${tracklist.length} tracks\n`;
+  return text;
+}
+
+function copyTracklist() {
+  const tl = state.lastTracklist;
+  if (!tl) return;
+  const text = buildTracklistText(tl.tracks, tl.duration);
+  navigator.clipboard.writeText(text).then(() => toast(tr("copiedTracklist")));
+}
+
+function downloadTracklistImage() {
+  const tl = state.lastTracklist;
+  if (!tl) return;
+  const tracks = tl.tracks;
+  const lineH = 32, padX = 32, padY = 28;
+  const headerH = 60, footerH = 44;
+  const w = 640;
+  const h = headerH + tracks.length * lineH + footerH + padY * 2;
+  const canvas = document.createElement("canvas");
+  const dpr = 2;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // background
+  const bg = ctx.createLinearGradient(0, 0, w, h);
+  bg.addColorStop(0, "#0a0b1a"); bg.addColorStop(1, "#12132a");
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h);
+
+  // header
+  ctx.fillStyle = "#fff"; ctx.font = "bold 20px Inter, system-ui, sans-serif";
+  ctx.fillText("Mashaiup Mix", padX, padY + 24);
+  ctx.fillStyle = "#888"; ctx.font = "13px Inter, system-ui, sans-serif";
+  ctx.fillText(new Date().toLocaleDateString() + ` · ${tracks.length} tracks · ${fmtTimestamp(tl.duration)}`, padX, padY + 46);
+
+  // divider
+  const lineY = headerH + padY;
+  const grd = ctx.createLinearGradient(padX, 0, w - padX, 0);
+  grd.addColorStop(0, "#7c5cff"); grd.addColorStop(1, "#21d4fd");
+  ctx.strokeStyle = grd; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(padX, lineY); ctx.lineTo(w - padX, lineY); ctx.stroke();
+
+  // tracks
+  tracks.forEach((t, i) => {
+    const y = lineY + 10 + (i + 1) * lineH;
+    const time = fmtTimestamp(t.start);
+    ctx.fillStyle = "#7c5cff"; ctx.font = "bold 13px SF Mono, Consolas, monospace";
+    ctx.fillText(time, padX, y);
+    ctx.fillStyle = "#e0e0e0"; ctx.font = "600 13px Inter, system-ui, sans-serif";
+    const title = t.title.length > 35 ? t.title.slice(0, 33) + "…" : t.title;
+    ctx.fillText(title, padX + 62, y);
+    const artist = t.artist && t.artist !== "Unknown" ? t.artist : "";
+    if (artist) {
+      ctx.fillStyle = "#888"; ctx.font = "12px Inter, system-ui, sans-serif";
+      ctx.fillText(artist.length > 20 ? artist.slice(0, 18) + "…" : artist, padX + 340, y);
+    }
+    ctx.fillStyle = "#21d4fd"; ctx.font = "11px SF Mono, Consolas, monospace";
+    ctx.fillText(`${t.bpm} BPM`, w - padX - 110, y);
+    ctx.fillStyle = "#ff5edb"; ctx.fillText(t.camelot, w - padX - 36, y);
+  });
+
+  // footer
+  ctx.fillStyle = "#555"; ctx.font = "10px Inter, system-ui, sans-serif";
+  ctx.fillText("Generated by Mashaiup", padX, h - 14);
+
+  canvas.toBlob(blob => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = "mashaiup_tracklist.png";
+    a.click(); URL.revokeObjectURL(url);
   });
 }
 
@@ -820,6 +1149,11 @@ function showResult(result) {
   $("#resultMeta").textContent =
     `${fmtTime(result.duration)} · ${result.n_tracks} tracks · ${result.lufs} LUFS · peak ${result.peak_dbfs} dBFS · rendered in ${result.elapsed || "?"}s`;
 
+  // store tracklist for export
+  if (result.tracklist) {
+    state.lastTracklist = { tracks: result.tracklist, duration: result.duration };
+  }
+
   const audio = $("#audio");
   audio.src = mp3Url || wavUrl;
   $("#dlWav").href = wavUrl;
@@ -839,6 +1173,15 @@ function showResult(result) {
     b.textContent = (ok ? "✓ " : "✕ ") + label;
     cb.appendChild(b);
   });
+
+  // tracklist export
+  if (result.tracklist && result.tracklist.length) {
+    const tlCard = $("#tracklistExport");
+    tlCard.hidden = false;
+    $("#tracklistText").textContent = buildTracklistText(result.tracklist, result.duration);
+    $("#copyTracklistBtn").onclick = copyTracklist;
+    $("#dlTracklistImg").onclick = downloadTracklistImage;
+  }
 
   card.scrollIntoView({ behavior: "smooth", block: "center" });
   setupPlayer();

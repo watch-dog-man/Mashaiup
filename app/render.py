@@ -31,6 +31,7 @@ from .analyzer import TrackAnalysis
 from .audio_io import load_audio, save_wav, to_stereo, wav_to_mp3
 from .config import (
     LIMITER_CEILING_DB,
+    MixSettings,
     OUTPUTS_DIR,
     RENDER_SR,
     TARGET_LUFS,
@@ -89,7 +90,10 @@ class Placement:
     rate: float
 
 
-def _source_duration(a: TrackAnalysis) -> float:
+def _source_duration(a: TrackAnalysis, settings: MixSettings | None = None) -> float:
+    if (settings and settings.allow_half_tracks
+            and a.features.has_repeat and a.features.half_point > 0):
+        return float(a.features.half_point)
     d = a.metadata.get("duration")
     if d and d > a.features.duration - 1:
         return float(d)
@@ -97,7 +101,8 @@ def _source_duration(a: TrackAnalysis) -> float:
 
 
 def compute_geometry(
-    ordered: list[TrackAnalysis], plans: list[TransitionPlan], deck_rates: list[float]
+    ordered: list[TrackAnalysis], plans: list[TransitionPlan], deck_rates: list[float],
+    settings: MixSettings | None = None,
 ) -> list[Placement]:
     """
     Turn plans into concrete timeline placements.  Robust against short tracks and
@@ -106,7 +111,7 @@ def compute_geometry(
     strictly increasing so segments never overlap incorrectly or index backwards.
     """
     n = len(ordered)
-    dur = [_source_duration(ordered[i]) / deck_rates[i] for i in range(n)]  # stretched-time durations
+    dur = [_source_duration(ordered[i], settings) / deck_rates[i] for i in range(n)]
 
     # entry points (where each track is first heard), clamped inside the track
     s_use = [0.0] * n
@@ -158,6 +163,123 @@ def _measure_lufs(y: np.ndarray, sr: int) -> float:
 
 
 # ---------------------------------------------------------------------------
+# transition preview
+# ---------------------------------------------------------------------------
+def render_transition_preview(
+    a: TrackAnalysis, b: TrackAnalysis,
+    plan: TransitionPlan, rate_a: float, rate_b: float,
+    settings, preview_id: str = "preview",
+    pad_s: float = 4.0,
+) -> dict:
+    """
+    Render a short audio snippet of one transition: pad_s of A solo -> overlap ->
+    pad_s of B solo.  Returns {"wav": path, "duration": float}.
+    """
+    sr = RENDER_SR
+    overlap = plan.overlap
+
+    # --- load & stretch track A ---
+    ya, _ = load_audio(a.path, sr=sr, mono=False)
+    ya = to_stereo(ya)
+    cg = corrective_eq_gains(a)
+    if any(abs(v) > 0.05 for v in cg.values()):
+        ya = fx.eq3(ya, sr, low_db=cg["low_db"], mid_db=cg["mid_db"], high_db=cg["high_db"])
+    if abs(rate_a - 1.0) > 1e-3:
+        ya = time_stretch(ya, sr, rate_a)
+    lufs_a = _measure_lufs(ya, sr)
+    ya = (ya * (10 ** (float(np.clip(REF_LUFS - lufs_a, -12, 12)) / 20))).astype(np.float32)
+
+    # --- load & stretch track B ---
+    yb, _ = load_audio(b.path, sr=sr, mono=False)
+    yb = to_stereo(yb)
+    cg = corrective_eq_gains(b)
+    if any(abs(v) > 0.05 for v in cg.values()):
+        yb = fx.eq3(yb, sr, low_db=cg["low_db"], mid_db=cg["mid_db"], high_db=cg["high_db"])
+    if abs(rate_b - 1.0) > 1e-3:
+        yb = time_stretch(yb, sr, rate_b)
+    lufs_b = _measure_lufs(yb, sr)
+    yb = (yb * (10 ** (float(np.clip(REF_LUFS - lufs_b, -12, 12)) / 20))).astype(np.float32)
+
+    # --- extract segments ---
+    out_s = int(plan.out_start / rate_a * sr)
+    in_s = int(plan.in_start / rate_b * sr)
+    ov_samples = int(overlap * sr)
+    pad_samples = int(pad_s * sr)
+
+    # A: pad before out_start + overlap region
+    a_start = max(0, out_s - pad_samples)
+    a_end = min(ya.shape[1], out_s + ov_samples)
+    seg_a = ya[:, a_start:a_end].copy()
+
+    # B: overlap region + pad after
+    b_start = max(0, in_s)
+    b_end = min(yb.shape[1], in_s + ov_samples + pad_samples)
+    seg_b = yb[:, b_start:b_end].copy()
+
+    del ya, yb
+    gc.collect()
+
+    # --- EQ automation for the transition ---
+    L = max(2, ov_samples)
+    eq_dict = build_transition_eq(a, b, L,
+        intensity=settings.transition_intensity, aggressive=settings.aggressive)
+
+    # --- apply tail FX + fade-out to A's overlap portion ---
+    a_ov_start = seg_a.shape[1] - min(ov_samples, seg_a.shape[1])
+    if a_ov_start < seg_a.shape[1] and ov_samples > 2:
+        tail = seg_a[:, a_ov_start:]
+        eqd = eq_dict["out"]
+        tail = fx.eq3_envelope(tail, sr, eqd["low"], eqd["mid"], eqd["high"])
+        tail = _apply_tail_fx(tail, sr, plan, a.bpm * rate_a)
+        fo, _ = fx.equal_power_fades(tail.shape[1])
+        tail = tail * fo[None, :]
+        seg_a[:, a_ov_start:] = tail
+
+    # --- apply head EQ + fade-in to B's overlap portion ---
+    b_ov_len = min(ov_samples, seg_b.shape[1])
+    if b_ov_len > 2:
+        head = seg_b[:, :b_ov_len]
+        eqd = eq_dict["in"]
+        head = fx.eq3_envelope(head, sr, eqd["low"], eqd["mid"], eqd["high"])
+        _, fi = fx.equal_power_fades(b_ov_len)
+        head = head * fi[None, :]
+        seg_b[:, :b_ov_len] = head
+
+    # --- mix into output buffer ---
+    total_samples = pad_samples + ov_samples + pad_samples + sr  # pad
+    out = np.zeros((2, total_samples), dtype=np.float32)
+
+    # place A: starts at 0
+    w_a = min(seg_a.shape[1], total_samples)
+    out[:, :w_a] += seg_a[:, :w_a]
+
+    # place B: starts at pad_samples (where the overlap begins)
+    b_offset = pad_samples
+    w_b = min(seg_b.shape[1], total_samples - b_offset)
+    if w_b > 0:
+        out[:, b_offset:b_offset + w_b] += seg_b[:, :w_b]
+
+    # --- light master ---
+    out = fx.dc_block(out)
+    out = fx.soft_limiter(out, sr, ceiling_db=LIMITER_CEILING_DB)
+    out = fx.peak_normalize(out, target_db=TRUE_PEAK_CEILING_DB)
+    out = fx.sanitize(out)
+    out = _trim_tail(out, sr)
+
+    # --- write ---
+    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    wav_path = OUTPUTS_DIR / f"{preview_id}.wav"
+    save_wav(wav_path, out, sr)
+    mp3_path = wav_to_mp3(wav_path, OUTPUTS_DIR / f"{preview_id}.mp3")
+
+    return {
+        "wav": str(wav_path),
+        "mp3": str(mp3_path) if mp3_path else None,
+        "duration": round(out.shape[1] / sr, 2),
+    }
+
+
+# ---------------------------------------------------------------------------
 # main render
 # ---------------------------------------------------------------------------
 def render_mix(
@@ -177,7 +299,7 @@ def render_mix(
         if progress_cb:
             progress_cb(p, msg)
 
-    places = compute_geometry(ordered, plans, deck_rates)
+    places = compute_geometry(ordered, plans, deck_rates, settings=settings)
     total_s = places[-1].tl_start + (places[-1].e_use - places[-1].s_use)
     total_samples = int(np.ceil(total_s * sr)) + sr  # +1 s pad for FX tails
     log.info("rendering %d tracks -> ~%.1f min mix", n, total_s / 60)
@@ -282,6 +404,18 @@ def render_mix(
     wav_path = OUTPUTS_DIR / f"{output_stub}.wav"
     save_wav(wav_path, out, sr, subtype="PCM_24")
 
+    tracklist = []
+    for i, a in enumerate(ordered):
+        pl = places[i]
+        tracklist.append({
+            "index": i + 1,
+            "title": a.title,
+            "artist": a.artist,
+            "bpm": round(safe_float(a.bpm * deck_rates[i]), 1),
+            "camelot": a.key.camelot,
+            "start": round(pl.tl_start, 2),
+        })
+
     result = {
         "wav": str(wav_path),
         "mp3": None,
@@ -290,6 +424,7 @@ def render_mix(
         "channels": 2,
         "peak_dbfs": round(safe_float(20 * np.log10(np.max(np.abs(out)) + 1e-9)), 2),
         "lufs": round(_measure_lufs(out, sr), 2),
+        "tracklist": tracklist,
     }
     if settings.output_format in ("mp3", "both"):
         mp3 = wav_to_mp3(wav_path, OUTPUTS_DIR / f"{output_stub}.mp3")

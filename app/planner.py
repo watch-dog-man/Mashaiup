@@ -273,11 +273,9 @@ def _apply_length_target(order, analyses, settings, C):
     if settings.target_minutes <= 0:
         return order
     target_s = settings.target_minutes * 60.0
-    # greedily keep the front of the set until we exceed target, but always keep
-    # at least 2 tracks; account for overlap shortening (~20 s per transition).
     kept, acc = [], 0.0
     for pos, idx in enumerate(order):
-        dur = analyses[idx].duration
+        dur = _effective_duration(analyses[idx], settings)
         overlap = 20.0 if kept else 0.0
         if acc + dur - overlap > target_s and len(kept) >= 2:
             break
@@ -286,9 +284,15 @@ def _apply_length_target(order, analyses, settings, C):
     return kept if len(kept) >= 2 else order[:2]
 
 
+def _effective_duration(a: TrackAnalysis, settings: MixSettings) -> float:
+    """Track duration accounting for half-track mode."""
+    if settings.allow_half_tracks and a.features.has_repeat and a.features.half_point > 0:
+        return a.features.half_point
+    return a.duration
+
+
 def _estimate_duration(order, analyses, settings) -> float:
-    total = sum(analyses[i].duration for i in order)
-    # each transition overlaps the two tracks by roughly the crossfade length
+    total = sum(_effective_duration(analyses[i], settings) for i in order)
     beats = settings.crossfade_beats
     for pos in range(len(order) - 1):
         bpm = analyses[order[pos]].bpm or 120

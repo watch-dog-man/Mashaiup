@@ -62,6 +62,14 @@ class GenerateRequest(BaseModel):
     files: list[str] | None = None
 
 
+class PreviewRequest(BaseModel):
+    transition_index: int
+
+
+class ReorderRequest(BaseModel):
+    order: list[int]
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -278,6 +286,85 @@ def create_app() -> FastAPI:
             pass
         except Exception as e:  # noqa: BLE001
             log.debug("ws closed: %s", e)
+
+    @app.post("/api/preview-transition")
+    async def preview_transition(req: PreviewRequest):
+        """Render a short audio snippet of one transition."""
+        ps = PROGRESS.get_pipeline_state()
+        if ps is None:
+            raise HTTPException(400, "No transitions planned yet.")
+        ordered = ps["ordered"]
+        plans = ps["plans"]
+        deck_rates = ps["deck_rates"]
+        settings = ps["settings"]
+        idx = req.transition_index
+        if idx < 0 or idx >= len(plans):
+            raise HTTPException(400, f"Invalid transition index {idx} (have {len(plans)})")
+
+        from .render import render_transition_preview
+
+        try:
+            result = await asyncio.to_thread(
+                render_transition_preview,
+                ordered[idx], ordered[idx + 1],
+                plans[idx], deck_rates[idx], deck_rates[idx + 1],
+                settings, preview_id=f"preview_trans_{idx}",
+            )
+        except Exception as e:
+            log.error("preview render failed: %s", e)
+            raise HTTPException(500, f"Preview render failed: {e}")
+        fname = Path(result["mp3"] or result["wav"]).name
+        return {"ok": True, "url": f"/outputs/{fname}", "duration": result["duration"]}
+
+    @app.post("/api/confirm-render")
+    async def confirm_render():
+        """Signal the pipeline to proceed with the full render."""
+        snap = PROGRESS.snapshot()
+        if snap.get("stage") != "previewing":
+            raise HTTPException(400, f"Not in preview stage (current: {snap.get('stage')})")
+        PROGRESS.confirm_render()
+        return {"ok": True}
+
+    @app.post("/api/reorder-journey")
+    async def reorder_journey(req: ReorderRequest):
+        """Reorder tracks in the journey and re-plan transitions."""
+        snap = PROGRESS.snapshot()
+        if snap.get("stage") != "previewing":
+            raise HTTPException(400, f"Not in preview stage (current: {snap.get('stage')})")
+        ps = PROGRESS.get_pipeline_state()
+        if ps is None:
+            raise HTTPException(400, "No pipeline state available.")
+        ordered = ps["ordered"]
+        settings = ps["settings"]
+        indices = req.order
+        if sorted(indices) != list(range(len(ordered))):
+            raise HTTPException(400, f"Invalid order: must be a permutation of 0..{len(ordered)-1}")
+
+        new_ordered = [ordered[i] for i in indices]
+
+        from .transition_engine import plan_all_transitions
+
+        try:
+            plans, deck_rates = await asyncio.to_thread(
+                plan_all_transitions, new_ordered, settings
+            )
+        except Exception as e:
+            log.error("reorder re-plan failed: %s", e)
+            raise HTTPException(500, f"Re-plan failed: {e}")
+
+        ps["ordered"] = new_ordered
+        ps["plans"] = plans
+        ps["deck_rates"] = deck_rates
+        PROGRESS.store_pipeline_state(ps)
+
+        plan_dict = snap.get("plan", {})
+        plan_dict["tracks"] = [a.summary() for a in new_ordered]
+        plan_dict["transition_details"] = [p.to_dict() for p in plans]
+        plan_dict["deck_rates"] = [round(r, 4) for r in deck_rates]
+        PROGRESS.update(stage="previewing", stage_progress=1.0, plan=plan_dict,
+                        message="Reordered — preview or confirm to render")
+
+        return {"ok": True, "plan": plan_dict}
 
     @app.post("/api/upload")
     async def upload(files: list[UploadFile] = File(...)):

@@ -28,6 +28,7 @@ from .config import (
 )
 from .dance_model import get_dance_model
 from .mood_model import get_mood_model
+from .structure import detect_structure
 from .utils import dump_json, file_fingerprint, get_logger, load_json, safe_float
 from .vibe_model import get_vibe_model
 
@@ -140,6 +141,11 @@ class TrackAnalysis:
             "mood_tags": self.vibe_tags.get("mood_tags", []),
             "dance_style": self.vibe_tags.get("dance_style"),
             "energy_curve": np.round(f.energy_curve[::4], 3).tolist(),  # decimated for UI
+            "has_repeat": f.has_repeat,
+            "half_point": round(safe_float(f.half_point), 1),
+            "repeat_score": round(safe_float(f.repeat_score), 3),
+            "repeat_map": f.repeat_map,
+            "vocal_regions": f.vocal_regions,
             "sources": {                       # which engine produced each signal
                 "vibe": self.vibe_tags.get("vibe_source"),
                 "mood": self.vibe_tags.get("mood_source"),
@@ -195,6 +201,13 @@ def analyze_track(path: str, use_cache: bool = True) -> TrackAnalysis:
     grid = bg.analyze_beatgrid(y, sr, path=path)
     key = keydet.detect_key(y, sr)
     features = feat.analyze_features(y, sr, beat_period=grid.beat_period)
+
+    # --- structural repetition detection (half-track support) ----------------
+    struct = detect_structure(y, sr, grid.phrase_times, features.duration)
+    features.has_repeat = struct["has_repeat"]
+    features.half_point = struct["half_point"]
+    features.repeat_score = struct["repeat_score"]
+    features.repeat_map = struct["repeat_map"]
 
     # --- model 1: vibe embedding + genre (CNN if trained, else DSP) ----------
     vibe = get_vibe_model()
